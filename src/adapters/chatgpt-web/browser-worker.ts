@@ -906,23 +906,63 @@ export async function resolveChatGptToolConfirmation(
   onVisible?: () => Promise<void>,
   onApprovalPending?: (pending: boolean) => Promise<void>,
 ): Promise<boolean> {
-  const dialog = page.locator('[role="dialog"], [data-testid="tool-approval-card"]')
-    .filter({ hasText: `Allow ChatGPT to use ${appName}?` })
+  const approvalTitle = `Allow ChatGPT to use ${appName}?`;
+  const knownSurface = page
+    .locator('[data-codex-approval-surface="true"], [role="dialog"], [data-testid="tool-approval-card"]')
+    .filter({ hasText: approvalTitle })
+    .filter({ visible: true })
     .last();
-  if (!await dialog.isVisible().catch(() => false)) return false;
+  let surface = knownSurface;
+  if (!await surface.isVisible().catch(() => false)) {
+    const title = page
+      .getByText(approvalTitle, { exact: true })
+      .filter({ visible: true })
+      .last();
+    if (!await title.isVisible().catch(() => false)) return false;
+    surface = title.locator("xpath=ancestor::*[.//button][1]");
+    if (!await surface.isVisible().catch(() => false)) return false;
+  }
+
+  const deny = surface
+    .getByRole("button", { name: "Deny", exact: true })
+    .filter({ visible: true })
+    .last();
+  const allowCurrentAction = surface
+    .getByRole("button", { name: /^Allow(?: once)?$/ })
+    .filter({ visible: true })
+    .last();
+  const allowPersistentAction = surface
+    .getByRole("button", { name: "Always allow", exact: true })
+    .filter({ visible: true })
+    .last();
+  if (!await deny.isVisible().catch(() => false)) return false;
+
   await onVisible?.();
   if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
 
   if (autoApprove) {
-    // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
-    // current one-shot approval. Keep the matcher anchored so persistent
-    // actions such as "Always allow" cannot match.
-    const allowCurrentAction = dialog
-      .getByRole("button", { name: /^Allow(?: once)?$/ })
-      .last();
-    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 });
-    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await allowCurrentAction.press("Enter");
+    const actionDeadline = Date.now() + 10_000;
+    for (;;) {
+      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+      if (await allowCurrentAction.isVisible().catch(() => false)) {
+        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+        await allowCurrentAction.click();
+        break;
+      }
+      if (await allowPersistentAction.isVisible().catch(() => false)) {
+        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+        await deny.press("Enter");
+        break;
+      }
+      if (!await surface.isVisible().catch(() => false)) return true;
+      if (Date.now() >= actionDeadline) {
+        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+        await deny.press("Enter");
+        break;
+      }
+      await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, actionDeadline - Date.now()))));
+    }
+    await surface.waitFor({ state: "hidden", timeout: 10_000 });
     return true;
   }
 
@@ -932,17 +972,16 @@ export async function resolveChatGptToolConfirmation(
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      if (!await dialog.isVisible().catch(() => false)) return true;
+      if (!await surface.isVisible().catch(() => false)) return true;
       await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now()))));
     }
 
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    if (!await dialog.isVisible().catch(() => false)) return true;
-    const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
+    if (!await surface.isVisible().catch(() => false)) return true;
     await deny.waitFor({ state: "visible", timeout: 5_000 });
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await deny.press("Enter");
-    await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+    await surface.waitFor({ state: "hidden", timeout: 10_000 });
     return true;
   } catch (error) {
     approvalError = error;
