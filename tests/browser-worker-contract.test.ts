@@ -3100,7 +3100,7 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
 
 function toolConfirmationPage(options: {
   disappearAfterReads?: number;
-  surface?: "dialog" | "card";
+  surface?: "dialog" | "card" | "codex" | "alert";
   allowLabel?: "Allow once" | "Allow" | "Always allow";
 } = {}): {
   page: Page;
@@ -3118,6 +3118,12 @@ function toolConfirmationPage(options: {
       last: () => button(name),
       waitFor: async () => {
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
+      },
+      isVisible: async () => actualName !== undefined && visible,
+      click: async () => {
+        if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
+        pressed.push(`${actualName}:click`);
+        visible = false;
       },
       press: async (key: string) => {
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
@@ -3145,7 +3151,11 @@ function toolConfirmationPage(options: {
   };
   const surfaceSelector = options.surface === "card"
     ? '[data-testid="tool-approval-card"]'
-    : '[role="dialog"]';
+    : options.surface === "codex"
+      ? '[data-codex-approval-surface="true"]'
+      : options.surface === "alert"
+        ? '[role="alert"]'
+        : '[role="dialog"]';
   const hiddenDialog = {
     filter: () => hiddenDialog,
     last: () => hiddenDialog,
@@ -3185,14 +3195,14 @@ test("explicit connector auto-approval still selects Allow once", async () => {
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true, undefined, 100,
     undefined, async value => { pending.push(value); })).toBeTrue();
   expect(pending).toEqual([]);
-  expect(fixture.pressed).toEqual(["Allow once:Enter"]);
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
 });
 
 test("connector auto-approval accepts the current shortened Allow action", async () => {
   const fixture = toolConfirmationPage({ allowLabel: "Allow" });
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
-  expect(fixture.pressed).toEqual(["Allow:Enter"]);
+  expect(fixture.pressed).toEqual(["Allow:click"]);
 });
 
 test("cancelling while an approval is pending clears the notice without choosing a button", async () => {
@@ -3224,7 +3234,21 @@ test("auto-approval recognizes the observed non-dialog approval card", async () 
   const fixture = toolConfirmationPage({ surface: "card" });
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
-  expect(fixture.pressed).toEqual(["Allow once:Enter"]);
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
+test("auto-approval recognizes the current Codex approval surface", async () => {
+  const fixture = toolConfirmationPage({ surface: "codex" });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
+test("auto-approval falls back to the semantic approval alert", async () => {
+  const fixture = toolConfirmationPage({ surface: "alert" });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
 });
 
 test("browser preflight separates model context from one-message transport limits", () => {

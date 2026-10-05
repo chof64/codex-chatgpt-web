@@ -906,23 +906,37 @@ export async function resolveChatGptToolConfirmation(
   onVisible?: () => Promise<void>,
   onApprovalPending?: (pending: boolean) => Promise<void>,
 ): Promise<boolean> {
-  const dialog = page.locator('[role="dialog"], [data-testid="tool-approval-card"]')
-    .filter({ hasText: `Allow ChatGPT to use ${appName}?` })
+  const approvalTitle = `Allow ChatGPT to use ${appName}?`;
+  const knownSurface = page
+    .locator('[data-codex-approval-surface="true"], [role="dialog"], [data-testid="tool-approval-card"]')
+    .filter({ hasText: approvalTitle })
     .last();
+  const alertSurface = page.locator('[role="alert"]')
+    .filter({ hasText: approvalTitle })
+    .last();
+  const knownSurfaceVisible = await knownSurface.isVisible().catch(() => false);
+  const dialog = knownSurfaceVisible ? knownSurface : alertSurface;
   if (!await dialog.isVisible().catch(() => false)) return false;
+
+  const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
+  const allowCurrentAction = dialog
+    .getByRole("button", { name: /^Allow(?: once)?$/ })
+    .last();
+  if (
+    !knownSurfaceVisible
+    && (
+      !await deny.isVisible().catch(() => false)
+      || !await allowCurrentAction.isVisible().catch(() => false)
+    )
+  ) return false;
+
   await onVisible?.();
   if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
 
   if (autoApprove) {
-    // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
-    // current one-shot approval. Keep the matcher anchored so persistent
-    // actions such as "Always allow" cannot match.
-    const allowCurrentAction = dialog
-      .getByRole("button", { name: /^Allow(?: once)?$/ })
-      .last();
     await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 });
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-    await allowCurrentAction.press("Enter");
+    await allowCurrentAction.click();
     return true;
   }
 
@@ -938,7 +952,6 @@ export async function resolveChatGptToolConfirmation(
 
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     if (!await dialog.isVisible().catch(() => false)) return true;
-    const deny = dialog.getByRole("button", { name: "Deny", exact: true }).last();
     await deny.waitFor({ state: "visible", timeout: 5_000 });
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await deny.press("Enter");
