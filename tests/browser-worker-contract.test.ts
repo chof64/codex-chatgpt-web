@@ -3100,13 +3100,16 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
 
 function toolConfirmationPage(options: {
   disappearAfterReads?: number;
-  surface?: "dialog" | "card" | "codex" | "alert";
+  surface?: "dialog" | "card" | "codex" | "semantic";
   allowLabel?: "Allow once" | "Allow" | "Always allow";
+  allowVisibleAfterChecks?: number;
+  staleHiddenKnownSurface?: boolean;
 } = {}): {
   page: Page;
   pressed: string[];
 } {
   let reads = 0;
+  let allowVisibilityChecks = 0;
   let visible = true;
   const pressed: string[] = [];
   const availableButtons = [options.allowLabel ?? "Allow once", "Deny"] as const;
@@ -3114,12 +3117,22 @@ function toolConfirmationPage(options: {
     const actualName = availableButtons.find(candidate => (
       typeof name === "string" ? candidate === name : name.test(candidate)
     ));
-    return {
-      last: () => button(name),
+    const oneTimeAllow = actualName === "Allow once" || actualName === "Allow";
+    const locator = {
+      filter: ({ visible: visibleFilter }: { visible?: boolean }) => {
+        if (visibleFilter !== undefined) expect(visibleFilter).toBeTrue();
+        return locator;
+      },
+      last: () => locator,
       waitFor: async () => {
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
       },
-      isVisible: async () => actualName !== undefined && visible,
+      isVisible: async () => {
+        if (actualName === undefined || !visible) return false;
+        if (!oneTimeAllow || options.allowVisibleAfterChecks === undefined) return true;
+        allowVisibilityChecks += 1;
+        return allowVisibilityChecks > options.allowVisibleAfterChecks;
+      },
       click: async () => {
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
         pressed.push(`${actualName}:click`);
@@ -3131,13 +3144,15 @@ function toolConfirmationPage(options: {
         visible = false;
       },
     };
+    return locator;
   };
-  const dialog = {
-    filter: ({ hasText }: { hasText: string }) => {
-      expect(hasText).toBe("Allow ChatGPT to use Codex Native?");
-      return dialog;
+  const approvalSurface = {
+    filter: ({ hasText, visible: visibleFilter }: { hasText?: string; visible?: boolean }) => {
+      if (hasText !== undefined) expect(hasText).toBe("Allow ChatGPT to use Codex Native?");
+      if (visibleFilter !== undefined) expect(visibleFilter).toBeTrue();
+      return approvalSurface;
     },
-    last: () => dialog,
+    last: () => approvalSurface,
     isVisible: async () => {
       reads += 1;
       if (options.disappearAfterReads !== undefined && reads >= options.disappearAfterReads) visible = false;
@@ -3153,19 +3168,48 @@ function toolConfirmationPage(options: {
     ? '[data-testid="tool-approval-card"]'
     : options.surface === "codex"
       ? '[data-codex-approval-surface="true"]'
-      : options.surface === "alert"
-        ? '[role="alert"]'
-        : '[role="dialog"]';
-  const hiddenDialog = {
-    filter: () => hiddenDialog,
-    last: () => hiddenDialog,
+      : '[role="dialog"]';
+  const hiddenSurface = {
+    filter: () => hiddenSurface,
+    last: () => hiddenSurface,
     isVisible: async () => false,
+  };
+  const visibleKnownSurfaceCollection = {
+    last: () => approvalSurface,
+  };
+  const knownSurfaceCollection = {
+    filter: (input: { hasText?: string; visible?: boolean }) => {
+      if (input.hasText !== undefined) {
+        expect(input.hasText).toBe("Allow ChatGPT to use Codex Native?");
+        return knownSurfaceCollection;
+      }
+      if (input.visible === true) return visibleKnownSurfaceCollection;
+      return knownSurfaceCollection;
+    },
+    last: () => options.staleHiddenKnownSurface ? hiddenSurface : approvalSurface,
+  };
+  const title = {
+    filter: ({ visible: visibleFilter }: { visible?: boolean }) => {
+      if (visibleFilter !== undefined) expect(visibleFilter).toBeTrue();
+      return title;
+    },
+    last: () => title,
+    isVisible: async () => options.surface === "semantic" && visible,
+    locator: (selector: string) => {
+      expect(selector).toBe("xpath=ancestor::*[.//button][1]");
+      return approvalSurface;
+    },
   };
   return {
     page: {
-      locator: (selector: string) => selector.includes(surfaceSelector)
-        ? dialog
-        : hiddenDialog,
+      locator: (selector: string) => options.surface !== "semantic" && selector.includes(surfaceSelector)
+        ? knownSurfaceCollection
+        : hiddenSurface,
+      getByText: (text: string, input: { exact?: boolean }) => {
+        expect(text).toBe("Allow ChatGPT to use Codex Native?");
+        expect(input.exact).toBeTrue();
+        return title;
+      },
     } as unknown as Page,
     pressed,
   };
@@ -3205,6 +3249,13 @@ test("connector auto-approval accepts the current shortened Allow action", async
   expect(fixture.pressed).toEqual(["Allow:click"]);
 });
 
+test("connector auto-approval waits for a one-time action that is still mounting", async () => {
+  const fixture = toolConfirmationPage({ allowVisibleAfterChecks: 1 });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
 test("cancelling while an approval is pending clears the notice without choosing a button", async () => {
   const fixture = toolConfirmationPage();
   const controller = new AbortController();
@@ -3225,9 +3276,18 @@ test("cancellation before auto-approval never grants permission", async () => {
 
 test("one-time auto-approval never selects a permanent permission", async () => {
   const fixture = toolConfirmationPage({ allowLabel: "Always allow" });
-  await expect(resolveChatGptToolConfirmation(fixture.page, "Codex Native", true))
-    .rejects.toThrow("Approval button not found");
-  expect(fixture.pressed).toEqual([]);
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Deny:Enter"]);
+});
+
+test("manual approval denies a permanent-only prompt after its timeout", async () => {
+  const fixture = toolConfirmationPage({ allowLabel: "Always allow" });
+  const pending: boolean[] = [];
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", false, undefined, 2,
+    undefined, async value => { pending.push(value); })).toBeTrue();
+  expect(pending).toEqual([true, false]);
+  expect(fixture.pressed).toEqual(["Deny:Enter"]);
 });
 
 test("auto-approval recognizes the observed non-dialog approval card", async () => {
@@ -3244,8 +3304,15 @@ test("auto-approval recognizes the current Codex approval surface", async () => 
   expect(fixture.pressed).toEqual(["Allow once:click"]);
 });
 
-test("auto-approval falls back to the semantic approval alert", async () => {
-  const fixture = toolConfirmationPage({ surface: "alert" });
+test("auto-approval finds the button-bearing ancestor when the title and controls are siblings", async () => {
+  const fixture = toolConfirmationPage({ surface: "semantic" });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
+test("auto-approval ignores a stale hidden approval surface when a visible copy exists", async () => {
+  const fixture = toolConfirmationPage({ staleHiddenKnownSurface: true });
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow once:click"]);
