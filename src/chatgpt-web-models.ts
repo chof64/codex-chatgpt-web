@@ -18,7 +18,7 @@ export type ChatGptWebZeroRiskBackendModel =
 
 export type ChatGptWebCodexEffort = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export type ChatGptWebAdapterEffort = "low" | "medium" | "high" | "xhigh" | "max";
-export type ChatGptWebModelFamily = "5.6" | "6";
+export type ChatGptWebModelFamily = "5.6" | "6" | "latest";
 
 /**
  * Measured Plus browser transport windows, including the fixed hidden ChatGPT platform reserve.
@@ -409,6 +409,30 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     interactionMode: "automatic",
     backendModel: CHATGPT_WEB_BACKEND_MODEL,
     modelFamily: "5.6",
+    codexEffort: "high",
+    adapterEffort: "high",
+    supportedCodexEfforts: ["medium", "high", "xhigh"],
+    requiresPro: false,
+  },
+  {
+    slug: "chatgpt-web/latest-instant",
+    displayName: "ChatGPT Latest Instant (Web)",
+    description: "ChatGPT Latest with Instant reasoning, using its own context and compaction budget.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "latest",
+    codexEffort: "low",
+    adapterEffort: "low",
+    supportedCodexEfforts: ["low"],
+    requiresPro: false,
+  },
+  {
+    slug: "chatgpt-web/latest",
+    displayName: "ChatGPT Latest (Web)",
+    description: "ChatGPT Latest with Medium, High, or account-supported Extra High reasoning.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "latest",
     codexEffort: "high",
     adapterEffort: "high",
     supportedCodexEfforts: ["medium", "high", "xhigh"],

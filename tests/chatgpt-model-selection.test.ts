@@ -32,3 +32,9 @@ test("family confirmation separates Latest staging from the actual Pro response"
   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);
   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "xhigh")).toBe(false);
 });
+
+test("Latest follows the selected moving model for non-Pro efforts", () => {
+  expect(chatGptModelFamilyMatches(["6.1 High, 3 of 5."], "latest", "high")).toBe(true);
+  expect(chatGptModelFamilyMatches(["7 Extra High, 4 of 5."], "latest", "xhigh")).toBe(true);
+  expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "latest", "max")).toBe(false);
+});

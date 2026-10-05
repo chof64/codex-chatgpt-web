@@ -14,6 +14,7 @@ function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWeb
 function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
   return menu.menu.getByRole("menuitemradio", {
     name: family === "5.6" ? /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i
+      : family === "latest" ? /^(?:Latest|最新|최신)$/i
       // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
       : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
     exact: true,
@@ -78,6 +79,10 @@ export function chatGptModelFamilyMatches(
       .exec(text.replace(/\s+/g, " ").trim());
     return match ? [{ version: match[1], name: match[2]?.toLowerCase(), mode: match[3]!.trim() }] : [];
   });
+  if (family === "latest") {
+    // Latest is a moving ChatGPT selector, so verify its non-Pro effort without pinning a version.
+    return effort !== "max" && states.length > 0 && states.every(state => !/^Pro$/i.test(state.mode));
+  }
   return states.length > 0 && states.every(state => state.version === expected
     && (!state.name || state.name === (expected === "5.6" ? "sol" : "astra"))
     && (effort === "max" ? /^Pro$/i.test(state.mode) : !/^Pro$/i.test(state.mode)));
