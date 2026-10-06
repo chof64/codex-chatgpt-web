@@ -3100,7 +3100,7 @@ test("unrelated ChatGPT alerts are not terminal", async () => {
 
 function toolConfirmationPage(options: {
   disappearAfterReads?: number;
-  surface?: "dialog" | "card" | "codex" | "semantic";
+  surface?: "dialog" | "card" | "codex" | "alert" | "semantic";
   allowLabel?: "Allow once" | "Allow" | "Always allow";
   allowVisibleAfterChecks?: number;
   staleHiddenKnownSurface?: boolean;
@@ -3168,6 +3168,8 @@ function toolConfirmationPage(options: {
     ? '[data-testid="tool-approval-card"]'
     : options.surface === "codex"
       ? '[data-codex-approval-surface="true"]'
+      : options.surface === "alert"
+        ? '[role="alert"]'
       : '[role="dialog"]';
   const hiddenSurface = {
     filter: () => hiddenSurface,
@@ -3299,6 +3301,13 @@ test("auto-approval recognizes the observed non-dialog approval card", async () 
 
 test("auto-approval recognizes the current Codex approval surface", async () => {
   const fixture = toolConfirmationPage({ surface: "codex" });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
+test("auto-approval recognizes the current alert approval surface", async () => {
+  const fixture = toolConfirmationPage({ surface: "alert" });
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow once:click"]);

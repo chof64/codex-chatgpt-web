@@ -908,7 +908,7 @@ export async function resolveChatGptToolConfirmation(
 ): Promise<boolean> {
   const approvalTitle = `Allow ChatGPT to use ${appName}?`;
   const knownSurface = page
-    .locator('[data-codex-approval-surface="true"], [role="dialog"], [data-testid="tool-approval-card"]')
+    .locator('[data-codex-approval-surface="true"], [role="dialog"], [role="alert"], [data-testid="tool-approval-card"]')
     .filter({ hasText: approvalTitle })
     .filter({ visible: true })
     .last();
