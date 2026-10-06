@@ -1,11 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_COMPOSER_SELECT_ALL_KEY, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptSubmissionRejectionObserver, ChatGptPromptAttachmentIntegrityError, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, sanitizeChatGptBrowserDiagnosticState, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_TOOL_CONFIRMATION_ACTION_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
 import { ensureChatGptPersonalizedConnectorAccess, chatGptUnavailableProDetail } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_STOPPED_THINKING_LABELS } from "../src/adapters/chatgpt-web/ui-labels";
@@ -3103,8 +3103,12 @@ function toolConfirmationPage(options: {
   surface?: "dialog" | "card" | "codex" | "alert" | "semantic";
   allowLabel?: "Allow once" | "Allow" | "Always allow";
   allowVisibleAfterChecks?: number;
+  allowVisible?: () => boolean;
+  allowVisibleWait?: Promise<void>;
+  onAllowWait?: () => void;
   denyVisibleAfterChecks?: number;
   staleHiddenKnownSurface?: boolean;
+  decoratedControls?: boolean;
 } = {}): {
   page: Page;
   pressed: string[];
@@ -3122,9 +3126,13 @@ function toolConfirmationPage(options: {
     hiddenWaiters.clear();
   };
   const availableButtons = [options.allowLabel ?? "Allow once", "Deny"] as const;
-  const button = (name: string | RegExp) => {
+  const button = (name: string | RegExp, matchExactLabel = false) => {
     const actualName = availableButtons.find(candidate => (
-      typeof name === "string" ? candidate === name : name.test(candidate)
+      typeof name === "string"
+        ? (matchExactLabel ? candidate : options.decoratedControls ? `${candidate} ${candidate === "Deny" ? "Esc" : "Enter"}` : candidate) === name
+        : name.test(matchExactLabel ? candidate : options.decoratedControls
+          ? `${candidate} ${candidate === "Deny" ? "Esc" : "Enter"}`
+          : candidate)
     ));
     const oneTimeAllow = actualName === "Allow once" || actualName === "Allow";
     const locator = {
@@ -3133,6 +3141,10 @@ function toolConfirmationPage(options: {
         return locator;
       },
       last: () => locator,
+      locator: (selector: string) => {
+        expect(selector).toContain("xpath=ancestor::*[contains(");
+        return approvalSurface;
+      },
       waitFor: async ({ state, signal }: { state?: string; signal?: AbortSignal } = {}) => {
         if (state !== undefined) expect(state).toBe("visible");
         if (!actualName) {
@@ -3143,6 +3155,19 @@ function toolConfirmationPage(options: {
             }
             signal?.addEventListener("abort", () => rejectWait(new DOMException("Aborted", "AbortError")), { once: true });
           });
+        }
+        if (oneTimeAllow && options.allowVisibleWait && options.allowVisible?.() === false) {
+          options.onAllowWait?.();
+          await Promise.race([
+            options.allowVisibleWait,
+            new Promise<never>((_resolveWait, rejectWait) => {
+              if (signal?.aborted) {
+                rejectWait(new DOMException("Aborted", "AbortError"));
+                return;
+              }
+              signal?.addEventListener("abort", () => rejectWait(new DOMException("Aborted", "AbortError")), { once: true });
+            }),
+          ]);
         }
         while (!await locator.isVisible()) {
           await new Promise<void>((resolveWait, rejectWait) => {
@@ -3156,6 +3181,7 @@ function toolConfirmationPage(options: {
       },
       isVisible: async () => {
         if (actualName === undefined || !visible) return false;
+        if (oneTimeAllow && options.allowVisible?.() === false) return false;
         if (actualName === "Deny" && options.denyVisibleAfterChecks !== undefined) {
           denyVisibilityChecks += 1;
           return denyVisibilityChecks > options.denyVisibleAfterChecks;
@@ -3177,6 +3203,14 @@ function toolConfirmationPage(options: {
     };
     return locator;
   };
+  const buttonFromLabelSelector = (selector: string) => {
+    const normalizedSelector = selector.toLowerCase();
+    const actualName = availableButtons.find(candidate => (
+      normalizedSelector.includes(`'${candidate.toLowerCase()}'`)
+      || normalizedSelector.includes(`\"${candidate.toLowerCase()}\"`)
+    ));
+    return actualName ? button(actualName, true) : absentButton;
+  };
   const approvalSurface = {
     filter: ({ hasText, visible: visibleFilter }: { hasText?: string | RegExp; visible?: boolean }) => {
       if (hasText !== undefined) expect(hasText).toBeInstanceOf(RegExp);
@@ -3190,6 +3224,7 @@ function toolConfirmationPage(options: {
       return visible;
     },
     getByRole: (_role: string, input: { name: string | RegExp }) => button(input.name),
+    locator: (selector: string) => buttonFromLabelSelector(selector),
     waitFor: async ({ state, signal }: { state: string; signal?: AbortSignal }) => {
       expect(state).toBe("hidden");
       if (!visible) return;
@@ -3249,6 +3284,7 @@ function toolConfirmationPage(options: {
     isVisible: async () => options.surface === "semantic" && visible,
     locator: (selector: string) => {
       expect(selector).toContain("xpath=ancestor::*[contains(");
+      expect(selector).toContain("self::button or @role='button'");
       return approvalSurface;
     },
   };
@@ -3267,12 +3303,15 @@ function toolConfirmationPage(options: {
   };
   const emptySurface = {
     getByRole: () => absentButton,
+    locator: () => absentButton,
   };
   return {
     page: {
-      locator: (selector: string) => options.surface !== "semantic" && selector.includes(surfaceSelector)
-        ? knownSurfaceCollection
-        : hiddenSurface,
+      locator: (selector: string) => selector.startsWith("xpath=.//*[")
+        ? buttonFromLabelSelector(selector)
+        : options.surface !== "semantic" && selector.includes(surfaceSelector)
+          ? knownSurfaceCollection
+          : hiddenSurface,
       getByText: (text: string | RegExp) => {
         expect(text).toBeInstanceOf(RegExp);
         return title;
@@ -3307,6 +3346,65 @@ test("explicit connector auto-approval still selects Allow once", async () => {
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true, undefined, 100,
     undefined, async value => { pending.push(value); })).toBeTrue();
   expect(pending).toEqual([]);
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
+test("auto-approval clears its pending notice only after the pending update settles", async () => {
+  jest.useFakeTimers();
+  try {
+    let allowVisible = false;
+    let markAllowWaitStarted: (() => void) | undefined;
+    const allowWaitStarted = new Promise<void>(resolveWait => { markAllowWaitStarted = resolveWait; });
+    let revealAllow: (() => void) | undefined;
+    const allowVisibleWait = new Promise<void>(resolveWait => { revealAllow = resolveWait; });
+    let releasePending: (() => void) | undefined;
+    const pendingUpdate = new Promise<void>(resolveWait => { releasePending = resolveWait; });
+    const fixture = toolConfirmationPage({
+      allowVisible: () => allowVisible,
+      allowVisibleWait,
+      onAllowWait: () => markAllowWaitStarted?.(),
+    });
+    const pendingEvents: string[] = [];
+    let settled = false;
+    const resolution = resolveChatGptToolConfirmation(fixture.page, "Codex Native", true, undefined, 100,
+      undefined, async pending => {
+        if (!pending) {
+          pendingEvents.push("clear");
+          return;
+        }
+        pendingEvents.push("pending:start");
+        await pendingUpdate;
+        pendingEvents.push("pending:end");
+      }).then(result => {
+        settled = true;
+        return result;
+      });
+
+    await allowWaitStarted;
+    jest.advanceTimersByTime(CHATGPT_TOOL_CONFIRMATION_ACTION_GRACE_MS);
+    await Promise.resolve();
+    expect(pendingEvents).toEqual(["pending:start"]);
+
+    allowVisible = true;
+    revealAllow?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBeFalse();
+    expect(pendingEvents).toEqual(["pending:start"]);
+
+    releasePending?.();
+    expect(await resolution).toBeTrue();
+    expect(pendingEvents).toEqual(["pending:start", "pending:end", "clear"]);
+    expect(fixture.pressed).toEqual(["Allow once:click"]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("connector auto-approval accepts labels nested beside keyboard hints", async () => {
+  const fixture = toolConfirmationPage({ decoratedControls: true });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow once:click"]);
 });
 

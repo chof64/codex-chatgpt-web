@@ -1003,11 +1003,56 @@ export async function resolveChatGptToolConfirmation(
   onApprovalPending?: (pending: boolean) => Promise<void>,
 ): Promise<boolean> {
   const escapedAppName = appName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const approvalTitle = new RegExp(`Allow\\s+ChatGPT\\s+to\\s+use\\s+${escapedAppName}\\s*\\??`, "i");
   const approvalContext = new RegExp(
     `(?=[\\s\\S]*${escapedAppName})(?=[\\s\\S]*(?:permission|access|allow|use))[\\s\\S]*`,
     "i",
   );
+  const approvalActionLocators = (scope: Page | Locator, labels: readonly string[]): Locator[] => {
+    const exactName = new RegExp(
+      `^(?:${labels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})$`,
+      "i",
+    );
+    const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const lower = "abcdefghijklmnopqrstuvwxyz";
+    const labelPredicates = labels.map(label => {
+      const literal = chatGptXpathLiteral(label.toLowerCase());
+      const lowerText = `translate(normalize-space(string(.)), '${upper}', '${lower}')`;
+      const lowerLabel = `translate(normalize-space(@aria-label), '${upper}', '${lower}')`;
+      const lowerNodeText = `translate(normalize-space(.), '${upper}', '${lower}')`;
+      return `(${lowerText}=${literal} or ${lowerLabel}=${literal} `
+        + `or descendant::*[${lowerText}=${literal}] `
+        + `or descendant-or-self::*[text()[${lowerNodeText}=${literal}]])`;
+    }).join(" or ");
+    const exactSemanticButton = scope
+      .getByRole("button", { name: exactName })
+      .filter({ visible: true })
+      .last();
+    const buttonContainingExactLabel = scope
+      .locator(`xpath=.//*[self::button or @role='button'][${labelPredicates}]`)
+      .filter({ visible: true })
+      .last();
+    return [exactSemanticButton, buttonContainingExactLabel];
+  };
+  const actionContext = (action: Locator): Locator => {
+    const appNameLiteral = chatGptXpathLiteral(appName.toLowerCase());
+    const lowerText = "translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+    const lowerLabel = "translate(normalize-space(@aria-label), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+    const lowerNodeText = "translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+    return action.locator(
+      `xpath=ancestor::*[contains(${lowerText}, ${appNameLiteral}) and `
+        + `(contains(${lowerText}, 'permission') or contains(${lowerText}, 'access') or contains(${lowerText}, 'use')) and `
+        + `(.//*[self::button or @role='button'][${lowerText}='deny' or ${lowerLabel}='deny' `
+        + `or descendant::*[${lowerText}='deny'] or descendant-or-self::*[text()[${lowerNodeText}='deny']]])][1]`,
+    );
+  };
+  const allowLabels = ["Allow once", "Allow"] as const;
+  const persistentAllowLabels = ["Always allow"] as const;
+  const denyLabels = ["Deny"] as const;
+  const associatedControlSurfaces = [
+    ...approvalActionLocators(page, allowLabels),
+    ...approvalActionLocators(page, persistentAllowLabels),
+    ...approvalActionLocators(page, denyLabels),
+  ].map(actionContext);
   const approvalSurfaceSelector = '[data-codex-approval-surface="true"], [role="dialog"], [role="alert"], [data-testid="tool-approval-card"]';
   let surface = page.locator(approvalSurfaceSelector)
     .filter({ hasText: approvalContext })
@@ -1015,7 +1060,7 @@ export async function resolveChatGptToolConfirmation(
     .last();
   if (!await surface.isVisible().catch(() => false)) {
     const title = page
-      .getByText(approvalTitle)
+      .getByText(approvalContext)
       .filter({ visible: true })
       .last();
     if (await title.isVisible().catch(() => false)) {
@@ -1023,45 +1068,20 @@ export async function resolveChatGptToolConfirmation(
       const lowerText = "translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
       surface = title.locator(
         `xpath=ancestor::*[contains(${lowerText}, ${appNameLiteral}) and `
-          + `(contains(${lowerText}, 'permission') or contains(${lowerText}, 'access') or contains(${lowerText}, 'use'))][1]`,
+          + `(contains(${lowerText}, 'permission') or contains(${lowerText}, 'access') or contains(${lowerText}, 'use')) and `
+          + `.//*[self::button or @role='button']][1]`,
       );
     } else {
-      return false;
+      const controlSurface = await firstVisibleLocator(associatedControlSurfaces);
+      if (!controlSurface) return false;
+      surface = controlSurface;
     }
     if (!await surface.isVisible().catch(() => false)) return false;
   }
 
-  const actionContext = (action: Locator): Locator => {
-    const appNameLiteral = chatGptXpathLiteral(appName.toLowerCase());
-    const lowerText = "translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
-    const lowerLabel = "translate(normalize-space(@aria-label), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
-    return action.locator(
-      `xpath=ancestor::*[contains(${lowerText}, ${appNameLiteral}) and `
-        + `(contains(${lowerText}, 'permission') or contains(${lowerText}, 'access') or contains(${lowerText}, 'use')) and `
-        + `(.//button[${lowerText}='deny' or ${lowerLabel}='deny'] `
-        + `or .//*[@role='button'][${lowerText}='deny' or ${lowerLabel}='deny'])][1]`,
-    );
-  };
-  const allowName = /^Allow(?:\s+once)?$/i;
-  const persistentAllowName = /^Always\s+allow$/i;
-  const makeAction = (scope: Locator, name: RegExp): Locator => scope
-    .getByRole("button", { name })
-    .filter({ visible: true })
-    .last();
-  const globalAllow = page.getByRole("button", { name: allowName }).filter({ visible: true }).last();
-  const globalPersistentAllow = page.getByRole("button", { name: persistentAllowName }).filter({ visible: true }).last();
-  const associatedAllowSurface = actionContext(globalAllow);
-  const associatedPersistentSurface = actionContext(globalPersistentAllow);
-  const allowActions = [makeAction(surface, allowName), makeAction(associatedAllowSurface, allowName)];
-  const persistentAllowActions = [
-    makeAction(surface, persistentAllowName),
-    makeAction(associatedPersistentSurface, persistentAllowName),
-  ];
-  const denyActions = [
-    makeAction(surface, /^Deny$/i),
-    makeAction(associatedAllowSurface, /^Deny$/i),
-    makeAction(associatedPersistentSurface, /^Deny$/i),
-  ];
+  const allowActions = approvalActionLocators(surface, allowLabels);
+  const persistentAllowActions = approvalActionLocators(surface, persistentAllowLabels);
+  const denyActions = approvalActionLocators(surface, denyLabels);
 
   await onVisible?.();
   if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -1069,29 +1089,31 @@ export async function resolveChatGptToolConfirmation(
   if (autoApprove) {
     let approvalPending = false;
     let approvalError: unknown;
-    try {
-      let actionWait = waitForChatGptToolApprovalChange(
-        surface,
-        [...allowActions, ...persistentAllowActions],
-        signal,
-      );
+    let approvalPendingNotification: Promise<void> | undefined;
+    const approvalPendingDeadline = Date.now() + CHATGPT_TOOL_CONFIRMATION_ACTION_GRACE_MS;
+    const waitWithPendingNotice = async <T>(wait: Promise<T>): Promise<T> => {
+      if (!onApprovalPending || approvalPending) return wait;
       let graceTimer: ReturnType<typeof setTimeout> | undefined;
-      let outcome: "action" | "dismissed" | "pending";
+      const pendingWait = new Promise<T>((resolveWait, rejectWait) => {
+        graceTimer = setTimeout(() => {
+          approvalPending = true;
+          approvalPendingNotification = Promise.resolve(onApprovalPending(true));
+          approvalPendingNotification
+            .then(() => wait.then(resolveWait, rejectWait), rejectWait);
+        }, Math.max(0, approvalPendingDeadline - Date.now()));
+      });
       try {
-        outcome = await Promise.race([
-          actionWait,
-          new Promise<"pending">(resolveWait => {
-            graceTimer = setTimeout(() => resolveWait("pending"), CHATGPT_TOOL_CONFIRMATION_ACTION_GRACE_MS);
-          }),
-        ]);
+        return await Promise.race([wait, pendingWait]);
       } finally {
         if (graceTimer !== undefined) clearTimeout(graceTimer);
       }
-      if (outcome === "pending") {
-        approvalPending = onApprovalPending !== undefined;
-        await onApprovalPending?.(true);
-        outcome = await actionWait;
-      }
+    };
+    try {
+      let outcome = await waitWithPendingNotice(waitForChatGptToolApprovalChange(
+        surface,
+        [...allowActions, ...persistentAllowActions],
+        signal,
+      ));
       for (;;) {
         if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
         if (outcome === "dismissed" || !await surface.isVisible().catch(() => false)) return true;
@@ -1102,10 +1124,10 @@ export async function resolveChatGptToolConfirmation(
           if (deny) {
             if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
             await visibleAllow.click();
-            await waitForChatGptLocatorState([surface], "hidden", undefined, signal);
+            await waitWithPendingNotice(waitForChatGptLocatorState([surface], "hidden", undefined, signal));
             return true;
           }
-          outcome = await waitForChatGptToolApprovalChange(surface, denyActions, signal);
+          outcome = await waitWithPendingNotice(waitForChatGptToolApprovalChange(surface, denyActions, signal));
           continue;
         }
 
@@ -1115,19 +1137,18 @@ export async function resolveChatGptToolConfirmation(
           if (deny) {
             if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
             await deny.press("Enter");
-            await waitForChatGptLocatorState([surface], "hidden", undefined, signal);
+            await waitWithPendingNotice(waitForChatGptLocatorState([surface], "hidden", undefined, signal));
             return true;
           }
-          outcome = await waitForChatGptToolApprovalChange(surface, denyActions, signal);
+          outcome = await waitWithPendingNotice(waitForChatGptToolApprovalChange(surface, denyActions, signal));
           continue;
         }
 
-        actionWait = waitForChatGptToolApprovalChange(
+        outcome = await waitWithPendingNotice(waitForChatGptToolApprovalChange(
           surface,
           [...allowActions, ...persistentAllowActions],
           signal,
-        );
-        outcome = await actionWait;
+        ));
       }
     } catch (error) {
       approvalError = error;
@@ -1135,6 +1156,7 @@ export async function resolveChatGptToolConfirmation(
     } finally {
       if (approvalPending) {
         try {
+          await approvalPendingNotification;
           await onApprovalPending?.(false);
         } catch (error) {
           if (approvalError === undefined) throw error;
@@ -1157,7 +1179,9 @@ export async function resolveChatGptToolConfirmation(
     if (!deny) throw new Error("ChatGPT tool approval timed out and its Deny action did not become available");
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await deny.press("Enter");
-    await waitForChatGptLocatorState([surface], "hidden", 10_000, signal);
+    if (!await waitForChatGptLocatorState([surface], "hidden", 10_000, signal)) {
+      throw new Error("ChatGPT tool approval remained visible after Deny was selected");
+    }
     return true;
   } catch (error) {
     approvalError = error;
@@ -2154,8 +2178,25 @@ class ChatGptBrowserDiagnostics {
           const exactConnectorRows = [...document.querySelectorAll('.__menu-item[tabindex="0"], [data-mention-list-scroll-area] button[data-list-navigation-item="true"]')]
             .filter(element => rendered(element) && exactText(element, appName));
           const visibleButtons = [...document.querySelectorAll('button, [role="button"]')].filter(rendered);
-          const buttonHasExactText = (expected: string): boolean => visibleButtons.some(element => (
-            (element.textContent ?? "").replace(/\s+/g, " ").trim() === expected
+          const normalizeText = (value: string | null): string => (value ?? "").replace(/\s+/g, " ").trim();
+          const controlHasExactLabel = (element: Element, expected: string): boolean => (
+            normalizeText(element.getAttribute("aria-label")) === expected
+            || normalizeText(element.textContent) === expected
+            || [...element.childNodes].some(node => (
+              node.nodeType === Node.TEXT_NODE && normalizeText(node.textContent) === expected
+            ))
+            || [...element.querySelectorAll("*")].some(candidate => (
+              rendered(candidate)
+              && (
+                normalizeText(candidate.textContent) === expected
+                || [...candidate.childNodes].some(node => (
+                  node.nodeType === Node.TEXT_NODE && normalizeText(node.textContent) === expected
+                ))
+              )
+            ))
+          );
+          const buttonHasExactLabel = (expected: string): boolean => visibleButtons.some(element => (
+            controlHasExactLabel(element, expected)
           ));
           const visibleApprovalSurfaces = [...document.querySelectorAll(
             '[data-codex-approval-surface="true"], [role="dialog"], [role="alert"], [data-testid="tool-approval-card"]',
@@ -2218,9 +2259,9 @@ class ChatGptBrowserDiagnostics {
                   element.children.length === 0
                   && (element.textContent ?? "").replace(/\s+/g, " ").trim() === appName
                 )),
-              allowOnceVisible: buttonHasExactText("Allow once") || buttonHasExactText("Allow"),
-              denyVisible: buttonHasExactText("Deny"),
-              alwaysAllowVisible: buttonHasExactText("Always allow"),
+              allowOnceVisible: buttonHasExactLabel("Allow once") || buttonHasExactLabel("Allow"),
+              denyVisible: buttonHasExactLabel("Deny"),
+              alwaysAllowVisible: buttonHasExactLabel("Always allow"),
             },
             focus: {
               tag: document.activeElement?.tagName.toLowerCase() ?? null,
