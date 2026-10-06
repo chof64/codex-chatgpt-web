@@ -3103,6 +3103,7 @@ function toolConfirmationPage(options: {
   surface?: "dialog" | "card" | "codex" | "alert" | "semantic";
   allowLabel?: "Allow once" | "Allow" | "Always allow";
   allowVisibleAfterChecks?: number;
+  denyVisibleAfterChecks?: number;
   staleHiddenKnownSurface?: boolean;
 } = {}): {
   page: Page;
@@ -3110,6 +3111,7 @@ function toolConfirmationPage(options: {
 } {
   let reads = 0;
   let allowVisibilityChecks = 0;
+  let denyVisibilityChecks = 0;
   let visible = true;
   const pressed: string[] = [];
   const availableButtons = [options.allowLabel ?? "Allow once", "Deny"] as const;
@@ -3129,6 +3131,10 @@ function toolConfirmationPage(options: {
       },
       isVisible: async () => {
         if (actualName === undefined || !visible) return false;
+        if (actualName === "Deny" && options.denyVisibleAfterChecks !== undefined) {
+          denyVisibilityChecks += 1;
+          return denyVisibilityChecks > options.denyVisibleAfterChecks;
+        }
         if (!oneTimeAllow || options.allowVisibleAfterChecks === undefined) return true;
         allowVisibilityChecks += 1;
         return allowVisibilityChecks > options.allowVisibleAfterChecks;
@@ -3147,8 +3153,8 @@ function toolConfirmationPage(options: {
     return locator;
   };
   const approvalSurface = {
-    filter: ({ hasText, visible: visibleFilter }: { hasText?: string; visible?: boolean }) => {
-      if (hasText !== undefined) expect(hasText).toBe("Allow ChatGPT to use Codex Native?");
+    filter: ({ hasText, visible: visibleFilter }: { hasText?: string | RegExp; visible?: boolean }) => {
+      if (hasText !== undefined) expect(hasText).toBeInstanceOf(RegExp);
       if (visibleFilter !== undefined) expect(visibleFilter).toBeTrue();
       return approvalSurface;
     },
@@ -3180,9 +3186,9 @@ function toolConfirmationPage(options: {
     last: () => approvalSurface,
   };
   const knownSurfaceCollection = {
-    filter: (input: { hasText?: string; visible?: boolean }) => {
+    filter: (input: { hasText?: string | RegExp; visible?: boolean }) => {
       if (input.hasText !== undefined) {
-        expect(input.hasText).toBe("Allow ChatGPT to use Codex Native?");
+        expect(input.hasText).toBeInstanceOf(RegExp);
         return knownSurfaceCollection;
       }
       if (input.visible === true) return visibleKnownSurfaceCollection;
@@ -3198,20 +3204,25 @@ function toolConfirmationPage(options: {
     last: () => title,
     isVisible: async () => options.surface === "semantic" && visible,
     locator: (selector: string) => {
-      expect(selector).toBe("xpath=ancestor::*[.//button][1]");
+      expect(selector).toBe("xpath=ancestor::*[.//button or .//*[@role='button']][1]");
       return approvalSurface;
     },
+  };
+  const absentButton = {
+    filter: () => absentButton,
+    last: () => absentButton,
+    isVisible: async () => false,
   };
   return {
     page: {
       locator: (selector: string) => options.surface !== "semantic" && selector.includes(surfaceSelector)
         ? knownSurfaceCollection
         : hiddenSurface,
-      getByText: (text: string, input: { exact?: boolean }) => {
-        expect(text).toBe("Allow ChatGPT to use Codex Native?");
-        expect(input.exact).toBeTrue();
+      getByText: (text: string | RegExp) => {
+        expect(text).toBeInstanceOf(RegExp);
         return title;
       },
+      getByRole: () => absentButton,
     } as unknown as Page,
     pressed,
   };
@@ -3253,6 +3264,13 @@ test("connector auto-approval accepts the current shortened Allow action", async
 
 test("connector auto-approval waits for a one-time action that is still mounting", async () => {
   const fixture = toolConfirmationPage({ allowVisibleAfterChecks: 1 });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:click"]);
+});
+
+test("connector auto-approval waits for Deny while the approval controls are still mounting", async () => {
+  const fixture = toolConfirmationPage({ denyVisibleAfterChecks: 1 });
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow once:click"]);
