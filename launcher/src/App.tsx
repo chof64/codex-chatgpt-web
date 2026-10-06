@@ -658,7 +658,9 @@ function LauncherShell({
             <Icon name="alert" />
             <div>
               <strong>{copy.toolApprovalNeeded} · {browserTabTitleFromTitle(tab.title, copy)}</strong>
-              <p>{copy.toolApprovalPendingBody}</p>
+              <p>{snapshot.state.autoApproveToolCalls
+                ? copy.toolApprovalAutoPendingBody
+                : copy.toolApprovalPendingBody}</p>
             </div>
             <SecondaryButton onClick={() => {
               navigateSurface("browser");

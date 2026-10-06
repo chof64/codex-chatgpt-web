@@ -919,16 +919,78 @@ function chatGptXpathLiteral(value: string): string {
   return parts.length === 1 ? parts[0]! : `concat(${parts.join(", ")})`;
 }
 
-async function chatGptHasUnresolvedToolConfirmation(page: Page, appName: string): Promise<boolean> {
-  const [allowVisible, denyVisible, appVisible] = await Promise.all([
-    page.getByRole("button", { name: /^Allow(?: once)?$/ }).filter({ visible: true }).last()
-      .isVisible().catch(() => false),
-    page.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true }).last()
-      .isVisible().catch(() => false),
-    page.getByText(appName, { exact: false }).filter({ visible: true }).last()
-      .isVisible().catch(() => false),
-  ]);
-  return allowVisible && denyVisible && appVisible;
+async function waitForChatGptLocatorState(
+  locators: Locator[],
+  state: "visible" | "hidden",
+  timeoutMs: number | undefined,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+
+  const waitController = new AbortController();
+  const abortWait = (): void => waitController.abort();
+  signal?.addEventListener("abort", abortWait, { once: true });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const waits = locators.map(locator => locator.waitFor({
+      state,
+      timeout: 0,
+      signal: waitController.signal,
+    }).then(() => true));
+    const timeoutWait = timeoutMs === undefined
+      ? new Promise<false>(() => {})
+      : new Promise<false>(resolveWait => {
+        timeout = setTimeout(() => resolveWait(false), timeoutMs);
+      });
+    return await Promise.race([...waits, timeoutWait]);
+  } catch (error) {
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    throw error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortWait);
+    waitController.abort();
+  }
+}
+
+async function waitForChatGptToolApprovalChange(
+  surface: Locator,
+  actions: Locator[],
+  signal?: AbortSignal,
+): Promise<"action" | "dismissed"> {
+  if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+
+  const waitController = new AbortController();
+  const abortWait = (): void => waitController.abort();
+  signal?.addEventListener("abort", abortWait, { once: true });
+  try {
+    const waits: Promise<"action" | "dismissed">[] = [
+      ...actions.map(action => action.waitFor({
+        state: "visible",
+        timeout: 0,
+        signal: waitController.signal,
+      }).then(() => "action" as const)),
+      surface.waitFor({
+        state: "hidden",
+        timeout: 0,
+        signal: waitController.signal,
+      }).then(() => "dismissed" as const),
+    ];
+    return await Promise.race(waits);
+  } catch (error) {
+    if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    throw error;
+  } finally {
+    signal?.removeEventListener("abort", abortWait);
+    waitController.abort();
+  }
+}
+
+async function firstVisibleLocator(locators: Locator[]): Promise<Locator | undefined> {
+  for (const locator of locators) {
+    if (await locator.isVisible().catch(() => false)) return locator;
+  }
+  return undefined;
 }
 
 export async function resolveChatGptToolConfirmation(
@@ -942,102 +1004,160 @@ export async function resolveChatGptToolConfirmation(
 ): Promise<boolean> {
   const escapedAppName = appName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const approvalTitle = new RegExp(`Allow\\s+ChatGPT\\s+to\\s+use\\s+${escapedAppName}\\s*\\??`, "i");
-  const knownSurface = page
-    .locator('[data-codex-approval-surface="true"], [role="dialog"], [role="alert"], [data-testid="tool-approval-card"]')
-    .filter({ hasText: approvalTitle })
+  const approvalContext = new RegExp(
+    `(?=[\\s\\S]*${escapedAppName})(?=[\\s\\S]*(?:permission|access|allow|use))[\\s\\S]*`,
+    "i",
+  );
+  const approvalSurfaceSelector = '[data-codex-approval-surface="true"], [role="dialog"], [role="alert"], [data-testid="tool-approval-card"]';
+  let surface = page.locator(approvalSurfaceSelector)
+    .filter({ hasText: approvalContext })
     .filter({ visible: true })
     .last();
-  let surface = knownSurface;
   if (!await surface.isVisible().catch(() => false)) {
     const title = page
       .getByText(approvalTitle)
       .filter({ visible: true })
       .last();
     if (await title.isVisible().catch(() => false)) {
-      surface = title.locator("xpath=ancestor::*[.//button or .//*[@role='button']][1]");
+      const appNameLiteral = chatGptXpathLiteral(appName.toLowerCase());
+      const lowerText = "translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+      surface = title.locator(
+        `xpath=ancestor::*[contains(${lowerText}, ${appNameLiteral}) and `
+          + `(contains(${lowerText}, 'permission') or contains(${lowerText}, 'access') or contains(${lowerText}, 'use'))][1]`,
+      );
     } else {
-      const oneTimeAction = page
-        .getByRole("button", { name: /^Allow(?: once)?$/ })
-        .filter({ visible: true })
-        .last();
-      if (!await oneTimeAction.isVisible().catch(() => false)) return false;
-      const appNameLiteral = chatGptXpathLiteral(appName);
-      surface = oneTimeAction
-        .locator("xpath=ancestor::*[contains(normalize-space(.), " + appNameLiteral + ") and "
-          + "(contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'permission') "
-          + "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'access') "
-          + "or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'use')) and "
-          + "(.//button[normalize-space(.)='Deny'] or .//*[@role='button'][normalize-space(.)='Deny'])][1]");
+      return false;
     }
     if (!await surface.isVisible().catch(() => false)) return false;
   }
 
-  const deny = surface
-    .getByRole("button", { name: "Deny", exact: true })
+  const actionContext = (action: Locator): Locator => {
+    const appNameLiteral = chatGptXpathLiteral(appName.toLowerCase());
+    const lowerText = "translate(normalize-space(string(.)), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+    const lowerLabel = "translate(normalize-space(@aria-label), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')";
+    return action.locator(
+      `xpath=ancestor::*[contains(${lowerText}, ${appNameLiteral}) and `
+        + `(contains(${lowerText}, 'permission') or contains(${lowerText}, 'access') or contains(${lowerText}, 'use')) and `
+        + `(.//button[${lowerText}='deny' or ${lowerLabel}='deny'] `
+        + `or .//*[@role='button'][${lowerText}='deny' or ${lowerLabel}='deny'])][1]`,
+    );
+  };
+  const allowName = /^Allow(?:\s+once)?$/i;
+  const persistentAllowName = /^Always\s+allow$/i;
+  const makeAction = (scope: Locator, name: RegExp): Locator => scope
+    .getByRole("button", { name })
     .filter({ visible: true })
     .last();
-  const allowCurrentAction = surface
-    .getByRole("button", { name: /^Allow(?: once)?$/ })
-    .filter({ visible: true })
-    .last();
-  const allowPersistentAction = surface
-    .getByRole("button", { name: "Always allow", exact: true })
-    .filter({ visible: true })
-    .last();
+  const globalAllow = page.getByRole("button", { name: allowName }).filter({ visible: true }).last();
+  const globalPersistentAllow = page.getByRole("button", { name: persistentAllowName }).filter({ visible: true }).last();
+  const associatedAllowSurface = actionContext(globalAllow);
+  const associatedPersistentSurface = actionContext(globalPersistentAllow);
+  const allowActions = [makeAction(surface, allowName), makeAction(associatedAllowSurface, allowName)];
+  const persistentAllowActions = [
+    makeAction(surface, persistentAllowName),
+    makeAction(associatedPersistentSurface, persistentAllowName),
+  ];
+  const denyActions = [
+    makeAction(surface, /^Deny$/i),
+    makeAction(associatedAllowSurface, /^Deny$/i),
+    makeAction(associatedPersistentSurface, /^Deny$/i),
+  ];
 
   await onVisible?.();
   if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
 
   if (autoApprove) {
-    const actionDeadline = Date.now() + CHATGPT_TOOL_CONFIRMATION_ACTION_GRACE_MS;
-    for (;;) {
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      if (!await surface.isVisible().catch(() => false)) return true;
-      const [denyVisible, allowVisible, persistentVisible] = await Promise.all([
-        deny.isVisible().catch(() => false),
-        allowCurrentAction.isVisible().catch(() => false),
-        allowPersistentAction.isVisible().catch(() => false),
-      ]);
-      if (denyVisible && allowVisible) {
-        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-        await allowCurrentAction.click();
-        break;
+    let approvalPending = false;
+    let approvalError: unknown;
+    try {
+      let actionWait = waitForChatGptToolApprovalChange(
+        surface,
+        [...allowActions, ...persistentAllowActions],
+        signal,
+      );
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      let outcome: "action" | "dismissed" | "pending";
+      try {
+        outcome = await Promise.race([
+          actionWait,
+          new Promise<"pending">(resolveWait => {
+            graceTimer = setTimeout(() => resolveWait("pending"), CHATGPT_TOOL_CONFIRMATION_ACTION_GRACE_MS);
+          }),
+        ]);
+      } finally {
+        if (graceTimer !== undefined) clearTimeout(graceTimer);
       }
-      if (denyVisible && persistentVisible) {
-        if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-        await deny.press("Enter");
-        break;
+      if (outcome === "pending") {
+        approvalPending = onApprovalPending !== undefined;
+        await onApprovalPending?.(true);
+        outcome = await actionWait;
       }
-      if (Date.now() >= actionDeadline) {
+      for (;;) {
         if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-        if (!denyVisible) {
-          throw new Error("ChatGPT tool approval appeared, but its action buttons did not become ready");
+        if (outcome === "dismissed" || !await surface.isVisible().catch(() => false)) return true;
+
+        const visibleAllow = await firstVisibleLocator(allowActions);
+        if (visibleAllow) {
+          const deny = await firstVisibleLocator(denyActions);
+          if (deny) {
+            if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+            await visibleAllow.click();
+            await waitForChatGptLocatorState([surface], "hidden", undefined, signal);
+            return true;
+          }
+          outcome = await waitForChatGptToolApprovalChange(surface, denyActions, signal);
+          continue;
         }
-        await deny.press("Enter");
-        break;
+
+        const visiblePersistentAllow = await firstVisibleLocator(persistentAllowActions);
+        if (visiblePersistentAllow) {
+          const deny = await firstVisibleLocator(denyActions);
+          if (deny) {
+            if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+            await deny.press("Enter");
+            await waitForChatGptLocatorState([surface], "hidden", undefined, signal);
+            return true;
+          }
+          outcome = await waitForChatGptToolApprovalChange(surface, denyActions, signal);
+          continue;
+        }
+
+        actionWait = waitForChatGptToolApprovalChange(
+          surface,
+          [...allowActions, ...persistentAllowActions],
+          signal,
+        );
+        outcome = await actionWait;
       }
-      await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, actionDeadline - Date.now()))));
+    } catch (error) {
+      approvalError = error;
+      throw error;
+    } finally {
+      if (approvalPending) {
+        try {
+          await onApprovalPending?.(false);
+        } catch (error) {
+          if (approvalError === undefined) throw error;
+          console.warn(`[chatgpt-web] could not clear tool approval status: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
     }
-    await surface.waitFor({ state: "hidden", timeout: 10_000 });
-    return true;
   }
 
   let approvalError: unknown;
   try {
     await onApprovalPending?.(true);
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
-      if (!await surface.isVisible().catch(() => false)) return true;
-      await new Promise(resolveSleep => setTimeout(resolveSleep, Math.min(100, Math.max(1, deadline - Date.now()))));
-    }
-
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
+    if (await waitForChatGptLocatorState([surface], "hidden", timeoutMs, signal)) return true;
     if (!await surface.isVisible().catch(() => false)) return true;
-    await deny.waitFor({ state: "visible", timeout: 5_000 });
+    const deny = await firstVisibleLocator(denyActions)
+      ?? (await waitForChatGptLocatorState(denyActions, "visible", 5_000, signal)
+        ? await firstVisibleLocator(denyActions)
+        : undefined);
+    if (!deny) throw new Error("ChatGPT tool approval timed out and its Deny action did not become available");
     if (signal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     await deny.press("Enter");
-    await surface.waitFor({ state: "hidden", timeout: 10_000 });
+    await waitForChatGptLocatorState([surface], "hidden", 10_000, signal);
     return true;
   } catch (error) {
     approvalError = error;
@@ -5480,6 +5600,7 @@ export class ChatGptBrowserWorker {
           () => diagnostics.capture(page, "tool-confirmation-visible"),
           async pending => {
             if (!launcherSurfaceId) return;
+            if (pending) await diagnostics.capture(page, "tool-confirmation-actions-pending");
             await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
               phase: "approval",
               traceId: turn.traceId,
@@ -5656,10 +5777,6 @@ export class ChatGptBrowserWorker {
           }
           if (!loggedCompletionWait && Date.now() - sentAt >= 60_000) {
             loggedCompletionWait = true;
-            if (mode.localTools && await chatGptHasUnresolvedToolConfirmation(page, this.config.appName)) {
-              await diagnostics.capture(page, "tool-confirmation-unrecognized");
-              throw new Error("ChatGPT is waiting for a tool approval that the browser worker could not resolve");
-            }
             await diagnostics.capture(page, "response-stalled-60s");
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
               diagnosticError: error instanceof Error ? error.message : String(error),

@@ -3114,6 +3114,13 @@ function toolConfirmationPage(options: {
   let denyVisibilityChecks = 0;
   let visible = true;
   const pressed: string[] = [];
+  const hiddenWaiters = new Set<() => void>();
+  const hideSurface = (): void => {
+    if (!visible) return;
+    visible = false;
+    for (const resolveHidden of hiddenWaiters) resolveHidden();
+    hiddenWaiters.clear();
+  };
   const availableButtons = [options.allowLabel ?? "Allow once", "Deny"] as const;
   const button = (name: string | RegExp) => {
     const actualName = availableButtons.find(candidate => (
@@ -3126,8 +3133,26 @@ function toolConfirmationPage(options: {
         return locator;
       },
       last: () => locator,
-      waitFor: async () => {
-        if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
+      waitFor: async ({ state, signal }: { state?: string; signal?: AbortSignal } = {}) => {
+        if (state !== undefined) expect(state).toBe("visible");
+        if (!actualName) {
+          await new Promise<never>((_resolveWait, rejectWait) => {
+            if (signal?.aborted) {
+              rejectWait(new DOMException("Aborted", "AbortError"));
+              return;
+            }
+            signal?.addEventListener("abort", () => rejectWait(new DOMException("Aborted", "AbortError")), { once: true });
+          });
+        }
+        while (!await locator.isVisible()) {
+          await new Promise<void>((resolveWait, rejectWait) => {
+            const timer = setTimeout(resolveWait, 1);
+            signal?.addEventListener("abort", () => {
+              clearTimeout(timer);
+              rejectWait(new DOMException("Aborted", "AbortError"));
+            }, { once: true });
+          });
+        }
       },
       isVisible: async () => {
         if (actualName === undefined || !visible) return false;
@@ -3142,12 +3167,12 @@ function toolConfirmationPage(options: {
       click: async () => {
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
         pressed.push(`${actualName}:click`);
-        visible = false;
+        hideSurface();
       },
       press: async (key: string) => {
         if (!actualName) throw new Error(`Approval button not found: ${String(name)}`);
         pressed.push(`${actualName}:${key}`);
-        visible = false;
+        hideSurface();
       },
     };
     return locator;
@@ -3161,13 +3186,32 @@ function toolConfirmationPage(options: {
     last: () => approvalSurface,
     isVisible: async () => {
       reads += 1;
-      if (options.disappearAfterReads !== undefined && reads >= options.disappearAfterReads) visible = false;
+      if (options.disappearAfterReads !== undefined && reads >= options.disappearAfterReads) hideSurface();
       return visible;
     },
     getByRole: (_role: string, input: { name: string | RegExp }) => button(input.name),
-    waitFor: async ({ state }: { state: string }) => {
+    waitFor: async ({ state, signal }: { state: string; signal?: AbortSignal }) => {
       expect(state).toBe("hidden");
-      expect(visible).toBeFalse();
+      if (!visible) return;
+      if (options.disappearAfterReads !== undefined) {
+        setTimeout(hideSurface, 5);
+      }
+      await new Promise<void>((resolveWait, rejectWait) => {
+        if (!visible) {
+          resolveWait();
+          return;
+        }
+        const resolve = () => {
+          hiddenWaiters.delete(resolve);
+          resolveWait();
+        };
+        const reject = () => {
+          hiddenWaiters.delete(resolve);
+          rejectWait(new DOMException("Aborted", "AbortError"));
+        };
+        hiddenWaiters.add(resolve);
+        signal?.addEventListener("abort", reject, { once: true });
+      });
     },
   };
   const surfaceSelector = options.surface === "card"
@@ -3204,14 +3248,25 @@ function toolConfirmationPage(options: {
     last: () => title,
     isVisible: async () => options.surface === "semantic" && visible,
     locator: (selector: string) => {
-      expect(selector).toBe("xpath=ancestor::*[.//button or .//*[@role='button']][1]");
+      expect(selector).toContain("xpath=ancestor::*[contains(");
       return approvalSurface;
     },
   };
   const absentButton = {
     filter: () => absentButton,
     last: () => absentButton,
+    locator: () => emptySurface,
+    waitFor: async ({ signal }: { signal?: AbortSignal } = {}) => await new Promise<never>((_resolveWait, rejectWait) => {
+      if (signal?.aborted) {
+        rejectWait(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      signal?.addEventListener("abort", () => rejectWait(new DOMException("Aborted", "AbortError")), { once: true });
+    }),
     isVisible: async () => false,
+  };
+  const emptySurface = {
+    getByRole: () => absentButton,
   };
   return {
     page: {
